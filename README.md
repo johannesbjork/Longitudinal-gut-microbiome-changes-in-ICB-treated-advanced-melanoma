@@ -1,7 +1,7 @@
 
 # Index
   * * fit_pibble_model.R
-    * The Logistic-Normal model (as implemented in Pibble, fido package) with three 3-way interactions
+      The Logistic-Normal model (as implemented in Pibble, fido package) with three 3-way interactions
   * * R_vs_NR.R
     * Function for computing, from the fitted model, the marginal average for PFS>=12 (R) vs PFS<12 (NR) averaging across all levels of W1 (therapy regimen), W2 (colitis) and W3 (PPI-use), and plotting the posteriors for taxa whose 90% (can be adjusted) credible interval (CI) does not cover 0
   * * R_vs_NR_monotherapy.R
