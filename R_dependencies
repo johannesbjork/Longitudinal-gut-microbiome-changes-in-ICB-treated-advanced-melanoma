@@ -5,3 +5,5 @@ library(wec) # for weighted sum contrasts
 library(zCompositions) # for 0-imputation 
 library(driver) # for a few CoDa functions; devtools::install_github("jsilve24/driver")
 library(ggtext) # for plotting
+library(survival) # for survival analysis
+library(ggsurvfit) # for plotting KM curves
