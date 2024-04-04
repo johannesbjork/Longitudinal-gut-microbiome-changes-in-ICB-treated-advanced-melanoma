@@ -1,7 +1,7 @@
 
 # Index
-  * * fit_pibble_model.R
-    * The Logistic-Normal model (as implemented in Pibble, fido package) with three 3-way interactions
+* * fit_pibble_model.R
+  * * The Logistic-Normal model (as implemented in Pibble, fido package) with three 3-way interactions
 
 
   * * R_vs_NR.R
