@@ -10,7 +10,11 @@
     * Function for computing and plotting the marginal average for PFS12>=12 (R) vs PFS<12 (NR) on combination therapy (W1=1), no colitis (W2=0) and no PPIs (W3=0)
   * * colitisyes_vs_colitisno.R
     * Function for computing and plotting the marginal average for colitis yes vs no, averaging over Z (PFS12), (therapy regimen) and W3 (PPI-use)
+
+  * * survival_analysis.R 
+    * Code for the survival analysis, including the calculation of the longitudinal balance
+
    
 For the underlying calculations, please see the Supplementary Methods in Björk et al. 2024, Nature Medicine.
 
-(More info and links to data will follow shortly)
+Data can be found on Open Science Framework: https://osf.io/rakdf/
