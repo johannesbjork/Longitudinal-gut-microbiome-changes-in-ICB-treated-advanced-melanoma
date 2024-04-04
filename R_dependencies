@@ -1,6 +1,7 @@
 library(phyloseq)
 library(tidyverse)
-library(fido)
-library(compositions)
-library(zCompositions)
-library(ggtext)
+library(fido) # for Pibble model
+library(wec) # for weighted sum contrasts
+library(zCompositions) # for 0-imputation 
+library(driver) # for a few CoDa functions; devtools::install_github("jsilve24/driver")
+library(ggtext) # for plotting
