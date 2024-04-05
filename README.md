@@ -23,6 +23,6 @@
     - Code for the survival analysis, including the calculation of the longitudinal balance
 
    
-For the underlying calculations, please see the Supplementary Methods in [Björk et al. 2024, Nature Medicine](https://doi.org/10.1038/s41591-024-02803-3).
+For the underlying calculations, please see the Methods and Supplementary Methods in [Björk et al. 2024, Nature Medicine](https://doi.org/10.1038/s41591-024-02803-3).
 
 Data can be found on Open Science Framework: https://osf.io/rakdf/
