@@ -1,6 +1,8 @@
 # Code for survival analysis
-ftbl <- read.csv("sgbs_baseline_survival.csv", check.names = F)
+ftbl <- read.csv("sgbs_baseline_survival.csv", check.names = F, row.names=1)
 mdat <- read.csv("mdat_baseline_survival.csv", check.names = F)
+
+ftbl <- as.matrix(zCompositions::cmultRepl(ftbl, label=0, method="CZM", z.delete=F)) # Bayesian 0 imputation
 
 # Select SGBs for the "Longitudinal" balance
 numerator_taxa <- c("f__Ruminococcaceae | s__Agathobaculum_butyriciproducens | t__SGB14993_group",
@@ -16,13 +18,13 @@ denominator_taxa <- c("f__Ruminococcaceae | s__Ruthenibacterium_lactatiformans |
                       "f__Prevotellaceae | s__Prevotella_copri_clade_A | t__SGB1626",
                       "f__FGB602 | s__GGB1420_SGB1957 | t__SGB1957")
 
-denominator_taxa_index <- match(denominator_taxa1, colnames(ftbl))
+denominator_taxa_index <- match(denominator_taxa, colnames(ftbl))
 
-balance_df <- mdat %>% mutate(balance_value=NA)
+balance_df <- mdat %>% mutate(balance_value=NA) %>% mutate(to_rowNames=sampleid) %>% column_to_rownames("to_rowNames")
 
 # Compute balance
-for(sample in rownames(ftbl)){
-  balance_df[sample,]$balance_value <- log(exp(mean(log(ftbl[sample,numerator_taxa_index])))) - log(exp(mean(log(ftbl[sample,denominator_taxa_index]))))  
+for(sample_i in rownames(ftbl)){
+  balance_df[sample_i,]$balance_value <- log(exp(mean(log(ftbl[sample_i,numerator_taxa_index])))) - log(exp(mean(log(ftbl[sample_i,denominator_taxa_index]))))  
 }
 
 # Categorize balance based on median 
@@ -54,6 +56,5 @@ p <-
 
 # Fit multivariable Cox regression
 fit <- coxph(Surv(os_months, status) ~ balance_cat + sex + age + bmi + ppi + antibiotics + previous_therapy, data = balance_df)
-
 
 
