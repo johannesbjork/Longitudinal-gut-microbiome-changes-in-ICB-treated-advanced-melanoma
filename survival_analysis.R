@@ -2,7 +2,7 @@
 ftbl <- read.csv("sgbs_baseline_survival.csv", check.names = F, row.names=1)
 mdat <- read.csv("mdat_baseline_survival.csv", check.names = F)
 
-ftbl <- as.matrix(zCompositions::cmultRepl(ftbl, label=0, method="CZM", z.delete=F)) # Bayesian 0 imputation
+ftbl <- as.matrix(zCompositions::cmultRepl(ftbl, label=0, method="CZM", z.delete=F)) # Bayesian 0 imputation (this will generate a warning about features and samples with >=80% 0s. Here, we choose to keep those, hence z.delete=FALSE)
 
 # Select SGBs for the "Longitudinal" balance
 numerator_taxa <- c("f__Ruminococcaceae | s__Agathobaculum_butyriciproducens | t__SGB14993_group",
