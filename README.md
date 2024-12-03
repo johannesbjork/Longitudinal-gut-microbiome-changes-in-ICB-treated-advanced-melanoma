@@ -2,7 +2,7 @@
 # Index
 
 * run_pibble_and_main_figure.Rmd
-    - RMarkdown file to (1) Load data; (2) perform weighted effect coding; (3) run Pibble model; (4) Compute average difference between R vs NR across visits using R_vs_NR.R; and (5) Generate Extended Data Fig. 2 
+    - RMarkdown file to (1) Load data; (2) Perform weighted effect coding; (3) Run Pibble model; (4) Compute average difference between R vs NR across visits; and (5) Generate Extended Data Fig. 2 
 
 *  fit_pibble_model.R
     - The Logistic-Normal model (as implemented in Pibble, fido package) with three 3-way interactions
