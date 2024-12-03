@@ -1,4 +1,3 @@
-
 # Set up Pibble model
 
 # interaction model
@@ -16,11 +15,11 @@ f <- reformulate(termlabels=c("visit*PFS12*combiIO",
                               "patientid"))
 
 # Create the design matrix
-X <- t(model.matrix(f, data=mdat_fido))
+X <- t(model.matrix(f, data=mdat))
 
 # Because we skip the multinomial part of the Pibble model, we have to deal with the 0s
-Y <- driver::miniclo(otu_table(ps_species)) # close compositions (i.e. sum constraint to 1)
-Y <- as.matrix(zCompositions::cmultRepl(Y)) # multiplicative 0 replacement 
+Y <- ftbl # it is already close compositions (i.e. sum constraint to 1)
+Y <- as.matrix(zCompositions::cmultRepl(Y, z.delete = F, z.warning = F)) # multiplicative 0 replacement 
 Y <- t(Y) # pibble assumes features on rows
 
 N <- ncol(Y) # number of samples
