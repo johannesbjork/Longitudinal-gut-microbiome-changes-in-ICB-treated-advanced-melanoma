@@ -1,0 +1,773 @@
+---
+title: "R Notebook"
+output: html_notebook
+author: Johannes R. Bjork
+---
+
+# load dependencies
+```{r}
+library(phyloseq)
+library(tidyverse)
+library(patchwork)
+library(fido) # for Pibble model
+library(wec) # for weighted sum contrasts
+library(zCompositions) # for 0-imputation 
+library(driver) # for a few CoDa functions; devtools::install_github("jsilve24/driver")
+library(ggtext)
+```
+
+# Load data
+```{r}
+# Data can be downloaded here: https://osf.io/rakdf/
+
+ftbl <- read.csv("sgbs_longi_pibble.csv", row.names = 1, header=T)
+
+mdat <- read.csv("mdat_longi_pibble.csv")
+
+# this is important for the WEC
+patient_factor_level_order <- read.csv("patientid_order.csv")$order
+
+mdat <- mdat %>% 
+  mutate(age_c=scale(age, scale=F, center=T), 
+         bmi_c=scale(bmi, scale=F, center=T),
+         patientid=factor(patientid, levels=patient_factor_level_order))
+
+# When sum contrasts are used for categorical factors, they are effectively “mean-centered”
+# Do this for "peripheral" variables
+attr(mdat$sex, "contrasts") <- wec::contr.wec(factor(mdat$sex), "male") 
+attr(mdat$previous_therapy, "contrasts") <- wec::contr.wec(factor(mdat$previous_therapy), "yes") 
+attr(mdat$centre, "contrasts") <- wec::contr.wec(factor(mdat$centre), "UMCG_PRIMM")  
+attr(mdat$toxicity, "contrasts") <- wec::contr.wec(factor(mdat$toxicity), "yes") 
+attr(mdat$antibiotics, "contrasts") <- wec::contr.wec(factor(mdat$antibiotics), "yes") 
+attr(mdat$patientid, "contrasts") <- wec::contr.wec(factor(mdat$patientid), "p_129")
+```
+
+```{r}
+# Set up Pibble model
+
+# interaction model
+f <- reformulate(termlabels=c("visit*PFS12*combiIO", 
+                              "visit*PFS12*colitis",
+                              "visit*PFS12*ppi",
+                              "centre", 
+                              "time_since_IO", 
+                              "antibiotics", 
+                              "toxicity", 
+                              "previous_therapy", 
+                              "age_c", 
+                              "sex", 
+                              "bmi_c", 
+                              "patientid"))
+
+# Create the design matrix
+X <- t(model.matrix(f, data=mdat))
+
+# Because we skip the multinomial part of the Pibble model, we have to deal with the 0s
+Y <- ftbl # it is already close compositions (i.e. sum constraint to 1)
+Y <- as.matrix(zCompositions::cmultRepl(Y, z.delete = F, z.warning = F)) # multiplicative 0 replacement 
+Y <- t(Y) # pibble assumes features on rows
+
+N <- ncol(Y) # number of samples
+D <- nrow(Y) # number of features (categories)
+
+# Specify uninformative (default) priors 
+upsilon <- D+3
+Omega <- diag(D)
+G <- cbind(diag(D-1), -1)
+Xi <- (upsilon-D)*G%*%Omega%*%t(G)
+Theta <- matrix(0, D-1, nrow(X))
+Gamma <- diag(nrow(X))
+
+priors <- pibble(NULL, X, upsilon, Theta, Gamma, Xi)
+
+# Fit the Pibble model
+eta_init <- t(driver::alr(t(Y))) # The model implemented using the ALR transform as it is computationally simple and fast; the results of the model can be viewed as if any number of transforms had been used, i.e. we can switch between any.
+eta_array <- array(eta_init, dim=c(nrow(eta_init), ncol(eta_init), 2000))
+# uncollapsePibble can be fitted on proportions (normally, this is an intermediate step; if we had counts, we would start with the optimPibbleCollapsed function)
+posterior <- uncollapsePibble(eta_array, priors$X, priors$Theta, priors$Gamma, priors$Xi, priors$upsilon, seed=2849)
+
+# Attach dimnames
+dimnames(posterior$Lambda)[[2]] <- rownames(X)
+dimnames(posterior$Lambda)[[1]] <- rownames(Y)[-length(rownames(Y))]
+dimnames(posterior$Sigma)[[1]] <- dimnames(posterior$Sigma)[[2]] <- rownames(Y)[-length(rownames(Y))]
+
+posterior <- pibblefit(D=D,
+                       N=N,
+                       Q=nrow(X),
+                       coord_system="alr",
+                       iter=2000L,
+                       alr_base=D,
+                       Eta=eta_array,
+                       Lambda=posterior$Lambda,
+                       Sigma=posterior$Sigma,
+                       Y=Y,
+                       X=X,
+                       names_categories=rownames(Y),
+                       names_samples=colnames(Y),
+                       names_covariates=rownames(X),
+                       upsilon=priors$upsilon,
+                       Theta=priors$Theta,
+                       Gamma=priors$Gamma,
+                       Xi=priors$Xi)
+
+# Change to CLR transform
+fit_species_clr <- to_clr(posterior)
+
+# Attach dimnames
+dimnames(fit_species_clr$Lambda)[[2]] <- rownames(X)
+dimnames(fit_species_clr$Lambda)[[1]] <- rownames(Y)
+dimnames(fit_species_clr$Sigma)[[1]] <- dimnames(fit_species_clr$Sigma)[[2]] <- rownames(Y)
+```
+
+```{r}
+# Function for computing, from the fitted model, the marginal average for PFS>=12 (R) vs PFS<12 (NR) averaging across all levels of W1 (therapy regimen), W2 (colitis) and W3 (PPI-use), and plotting the posteriors whose "siglevel" CI does not cover 0  
+# For the underlying calculations, please see the Supplementary Methods in Björk et al. (2024)
+plot_RvsNR <- function(pibble_fit=pibble_fit, siglevel=siglevel) {
+  
+  focus_vars <- c("visit","PFS12yes","combiIOyes","colitisyes","ppiyes")
+
+  avg_diffs <- as.data.frame.table(pibble_fit$Lambda) %>%
+    pivot_wider(id_cols=c(Var1,Var3), names_from=Var2, values_from=Freq) %>%
+    select(feature=Var1, b0=`(Intercept)`, contains(focus_vars)) %>% 
+    mutate(feature=str_remove_all(string = feature, pattern = "f__"),
+           feature=str_remove_all(string = feature, pattern = "s__"),
+           feature=str_remove_all(string = feature, pattern = "t__")) %>% 
+
+    group_by(feature) %>% 
+    
+    mutate(
+      
+      # Slopes for R
+      
+      slopes_NR =
+        !!rlang::sym(focus_vars[1]) +
+        0.5*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5]))),
+      
+      slopes_R =
+        !!rlang::sym(focus_vars[1]) +
+        !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2])) +
+        0.5*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5])) +
+               
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[4])) +       
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[5]))),
+      
+      # R vs NR averaging across all W scenarios
+      avgdiff_RvsNR_x_t0 =
+        !!rlang::sym(focus_vars[2]) +
+        
+        0.5*(!!rlang::sym(paste0(focus_vars[2],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[2],":",focus_vars[4])) +
+               !!rlang::sym(paste0(focus_vars[2],":",focus_vars[5]))) +
+        
+        0*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[2]))) +
+        
+        0.5*(
+          0*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[4])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[5])))
+        ),
+      
+      avgdiff_RvsNR_x_t1 =
+        !!rlang::sym(focus_vars[2]) +
+        
+        0.5*(!!rlang::sym(paste0(focus_vars[2],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[2],":",focus_vars[4])) +
+               !!rlang::sym(paste0(focus_vars[2],":",focus_vars[5]))) +
+        
+        1*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[2]))) +
+        
+        0.5*(
+          1*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[4])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[5])))
+        ),
+      
+      avgdiff_RvsNR_x_t2 =
+        !!rlang::sym(focus_vars[2]) +
+        
+        0.5*(!!rlang::sym(paste0(focus_vars[2],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[2],":",focus_vars[4])) +
+               !!rlang::sym(paste0(focus_vars[2],":",focus_vars[5]))) +
+        
+        2*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[2]))) +
+        
+        0.5*(
+          2*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[4])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[5])))
+        ),
+      
+      avgdiff_RvsNR_x_t3 =
+        !!rlang::sym(focus_vars[2]) +
+        0.5*(!!rlang::sym(paste0(focus_vars[2],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[2],":",focus_vars[4])) +
+               !!rlang::sym(paste0(focus_vars[2],":",focus_vars[5]))) +
+        
+        3*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[2]))) +
+        
+        0.5*(
+          3*(!!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[3])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[4])) +
+               !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[5])))
+        )
+    ) %>%
+    
+    select(feature, slopes_R, slopes_NR, avgdiff_RvsNR_x_t0, avgdiff_RvsNR_x_t1, avgdiff_RvsNR_x_t2, avgdiff_RvsNR_x_t3)
+  
+  ranks_ls <- vector("list", 4)
+  names(ranks_ls) <- c("avgdiff_RvsNR_x_t0","avgdiff_RvsNR_x_t1","avgdiff_RvsNR_x_t2","avgdiff_RvsNR_x_t3")
+  
+  for(i in names(ranks_ls)) {
+    print(i)
+    
+    ranks_ls[[i]]$sig_increasing <-
+      avg_diffs %>% 
+      select(feature, !!rlang::sym(i)) %>% 
+      group_by(feature) %>%
+      ggdist::median_qi(!!rlang::sym(i), .width=c(0, 0.5, 0.75, 0.90, 0.95, 0.97, 1)) %>% 
+      mutate(feature=reorder(factor(feature), !!rlang::sym(i))) %>% 
+      pivot_wider(id_cols=feature, names_from=.width, values_from=.lower) %>%
+      select(feature, p0=`0`, p50=`0.5`, p75=`0.75`, p90=`0.9`, p95=`0.95`, p97=`0.97`, p1=`1`) %>%
+      filter(!! rlang::sym(siglevel) > 0) %>%
+      mutate(feature=factor(feature)) %>% 
+      select(feature) %>% 
+      pull() %>% 
+      levels() 
+    
+    ranks_ls[[i]]$sig_decreasing <-
+      avg_diffs %>% 
+      select(feature, !!rlang::sym(i)) %>% 
+      group_by(feature) %>%
+      ggdist::median_qi(!!rlang::sym(i), .width=c(0, 0.5, 0.75, 0.90, 0.95, 0.97, 1)) %>% 
+      mutate(feature=reorder(factor(feature), !!rlang::sym(i))) %>% 
+      pivot_wider(id_cols=feature, names_from=.width, values_from=.upper) %>%
+      select(feature, p0=`0`, p50=`0.5`, p75=`0.75`, p90=`0.9`, p95=`0.95`, p97=`0.97`, p1=`1`) %>%
+      filter(!! rlang::sym(siglevel) < 0) %>%
+      mutate(feature=factor(feature)) %>% 
+      select(feature) %>% 
+      pull() %>% 
+      levels()
+  }
+  
+  all_taxa <- c(ranks_ls$avgdiff_RvsNR_x_t0$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t0$sig_decreasing,
+                ranks_ls$avgdiff_RvsNR_x_t1$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t1$sig_decreasing,
+                ranks_ls$avgdiff_RvsNR_x_t2$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t2$sig_decreasing,
+                ranks_ls$avgdiff_RvsNR_x_t3$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t3$sig_decreasing)
+  
+  ranks_ls2 <- vector("list", 2)
+  names(ranks_ls2) <- c("slopes_R","slopes_NR")
+  
+  for(i in names(ranks_ls2)) {
+    print(i)
+    
+    ranks_ls2[[i]]$sig_increasing <-
+      avg_diffs %>% 
+      select(feature, !!rlang::sym(i)) %>% 
+      group_by(feature) %>%
+      ggdist::median_qi(!!rlang::sym(i), .width=c(0, 0.5, 0.75, 0.90, 0.95, 0.97, 1)) %>% 
+      mutate(feature=reorder(factor(feature), !!rlang::sym(i))) %>% 
+      pivot_wider(id_cols=feature, names_from=.width, values_from=.lower) %>%
+      select(feature, p0=`0`, p50=`0.5`, p75=`0.75`, p90=`0.9`, p95=`0.95`, p97=`0.97`, p1=`1`) %>%
+      
+      #filter(!! rlang::sym(siglevel) > 0) %>% # this is to find non-zero slopes
+      
+      filter(feature %in% all_taxa) %>% # this is to retain differentially abundant taxa at the specified siglevel 
+      
+      mutate(feature=factor(feature)) %>% 
+      select(feature) %>% 
+      pull() %>% 
+      levels() 
+    
+    ranks_ls2[[i]]$sig_decreasing <-
+      avg_diffs %>% 
+      select(feature, !!rlang::sym(i)) %>% 
+      group_by(feature) %>%
+      ggdist::median_qi(!!rlang::sym(i), .width=c(0, 0.5, 0.75, 0.90, 0.95, 0.97, 1)) %>% 
+      mutate(feature=reorder(factor(feature), !!rlang::sym(i))) %>% 
+      pivot_wider(id_cols=feature, names_from=.width, values_from=.upper) %>%
+      select(feature, p0=`0`, p50=`0.5`, p75=`0.75`, p90=`0.9`, p95=`0.95`, p97=`0.97`, p1=`1`) %>%
+      
+      #filter(!! rlang::sym(siglevel) < 0) %>% # this is to find non-zero slopes
+      
+      filter(feature %in% all_taxa) %>% # this is to retain differentially abundant taxa at the specified siglevel 
+      
+      mutate(feature=factor(feature)) %>% 
+      select(feature) %>% 
+      pull() %>% 
+      levels()
+  }
+  
+  ## Color labeling features shared between different visits
+  
+  # Features shared between t2 and t1
+  shared_t1_t2 <- Reduce(intersect, list(c(ranks_ls$avgdiff_RvsNR_x_t0$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t0$sig_decreasing),
+                                         c(ranks_ls$avgdiff_RvsNR_x_t1$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t1$sig_decreasing)))
+  
+  # Features shared between t3 and t2
+  shared_t2_t3 <- Reduce(intersect, list(c(ranks_ls$avgdiff_RvsNR_x_t1$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t1$sig_decreasing),
+                                         c(ranks_ls$avgdiff_RvsNR_x_t2$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t2$sig_decreasing)))
+  
+  # Features shared between t4 and t3
+  shared_t3_t4 <- Reduce(intersect, list(c(ranks_ls$avgdiff_RvsNR_x_t2$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t2$sig_decreasing),
+                                         c(ranks_ls$avgdiff_RvsNR_x_t3$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t3$sig_decreasing)))
+  
+  # Features shared between t4, t3, t2
+  shared_t2_t3_t4 <- Reduce(intersect, list(
+    c(ranks_ls$avgdiff_RvsNR_x_t3$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t3$sig_decreasing),
+    c(ranks_ls$avgdiff_RvsNR_x_t2$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t2$sig_decreasing),
+    c(ranks_ls$avgdiff_RvsNR_x_t1$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t1$sig_decreasing)))
+  
+  # Remember that t0 is visit 1 and t1 is visit 2 and so forth...
+  y_labels_t2 <- setNames(rep("black",length(c(ranks_ls$avgdiff_RvsNR_x_t1$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t1$sig_decreasing))),
+                          rev(c(rev(ranks_ls$avgdiff_RvsNR_x_t1$sig_increasing), rev(ranks_ls$avgdiff_RvsNR_x_t1$sig_decreasing))))
+  
+  y_labels_t3 <- setNames(rep("black",length(c(ranks_ls$avgdiff_RvsNR_x_t2$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t2$sig_decreasing))),
+                          rev(c(rev(ranks_ls$avgdiff_RvsNR_x_t2$sig_increasing), rev(ranks_ls$avgdiff_RvsNR_x_t2$sig_decreasing))))
+  
+  y_labels_t4 <- setNames(rep("black",length(c(ranks_ls$avgdiff_RvsNR_x_t3$sig_increasing, ranks_ls$avgdiff_RvsNR_x_t3$sig_decreasing))),
+                          rev(c(rev(ranks_ls$avgdiff_RvsNR_x_t3$sig_increasing), rev(ranks_ls$avgdiff_RvsNR_x_t3$sig_decreasing))))
+  
+  y_labels_t2[shared_t1_t2] <- "#74c476"
+  y_labels_t3[shared_t2_t3] <- "#74c476"
+  y_labels_t4[setdiff(shared_t3_t4, shared_t2_t3_t4)] <- "#74c476"
+  y_labels_t4[shared_t2_t3_t4] <- "#005a32"
+  
+  plot_ls <- vector("list", 6)
+  names(plot_ls) <- c("slopes_R","slopes_NR","avgdiff_RvsNR_x_t0","avgdiff_RvsNR_x_t1","avgdiff_RvsNR_x_t2","avgdiff_RvsNR_x_t3")
+  
+  for(p in names(plot_ls)) {
+    print(p)
+    
+    if (p=="avgdiff_RvsNR_x_t0") {
+      
+      gp <- avg_diffs %>% 
+        select(feature, !!rlang::sym(p)) %>% 
+        group_by(feature) %>%
+        ggdist::median_qi(!!rlang::sym(p), .width=c(0.5, 0.75, 0.90, 0.95, 0.97)) %>% 
+        mutate(feature=reorder(factor(feature), !!rlang::sym(p))) %>% 
+        filter(feature %in% c(ranks_ls[[p]]$sig_increasing, ranks_ls[[p]]$sig_decreasing)) %>%
+        
+        ggplot(aes(y=reorder(factor(feature), !!rlang::sym(p)), x=!!rlang::sym(p), xmin=.lower, xmax=.upper)) +
+        ggdist::geom_interval(aes(alpha=.width), color="orange3") +
+        scale_alpha_continuous("Credible interval", range=c(.7, .15), breaks=c(0.5, 0.75, 0.90, 0.95, 0.97)) +
+        geom_point() +
+        theme(
+          legend.key=element_rect(fill='white'),
+          legend.text=element_text(size=10, color="black"),
+          strip.background=element_blank(),
+          strip.text=element_blank(),
+          panel.grid.major=element_blank(), 
+          panel.grid.minor=element_blank(), 
+          panel.background=element_rect(fill="white"),
+          panel.border=element_rect(colour="black", fill=NA, size=1),
+          axis.ticks.length.y=unit(0.25,"cm"), 
+          axis.text.x=element_text(size=12, color="black"),
+          axis.text.y=element_text(size=7, color="black")) +
+        labs(x="Log-Ratio Value", y=NULL, title=paste0("T0: R vs NR")) + 
+        geom_vline(xintercept=0, linetype="dashed", color="darkgray")
+      
+      plot_ls[[p]] <- gp
+      
+    } else if (p=="avgdiff_RvsNR_x_t1") {
+      
+      gp <- avg_diffs %>% 
+        select(feature, !!rlang::sym(p)) %>% 
+        group_by(feature) %>%
+        ggdist::median_qi(!!rlang::sym(p), .width=c(0.5, 0.75, 0.90, 0.95, 0.97)) %>% 
+        mutate(feature=reorder(factor(feature), !!rlang::sym(p))) %>% 
+        filter(feature %in% c(ranks_ls[[p]]$sig_increasing, ranks_ls[[p]]$sig_decreasing)) %>%
+        
+        ggplot(aes(y=reorder(factor(feature), !!rlang::sym(p)), x=!!rlang::sym(p), xmin=.lower, xmax=.upper)) +
+        ggdist::geom_interval(aes(alpha=.width), color="orange3") +
+        scale_alpha_continuous("Credible interval", range=c(.7, .15), breaks=c(0.5, 0.75, 0.90, 0.95, 0.97)) +
+        geom_point() +
+        theme(
+          legend.key=element_rect(fill='white'),
+          legend.text=element_text(size=10, color="black"),
+          strip.background=element_blank(),
+          strip.text=element_blank(),
+          panel.grid.major=element_blank(), 
+          panel.grid.minor=element_blank(), 
+          panel.background=element_rect(fill="white"),
+          panel.border=element_rect(colour="black", fill=NA, size=1),
+          axis.ticks.length.y=unit(0.25,"cm"), 
+          axis.text.x=element_text(size=12, color="black"),
+          axis.text.y=ggtext::element_markdown(color=unname(y_labels_t2), size=7)) +
+        labs(x="Log-Ratio Value", y=NULL, title=paste0("T1: R vs NR")) + 
+        geom_vline(xintercept=0, linetype="dashed", color="darkgray")
+      
+      plot_ls[[p]] <- gp
+      
+    } else if (p=="avgdiff_RvsNR_x_t2") {
+      
+      gp <- avg_diffs %>% 
+        select(feature, !!rlang::sym(p)) %>% 
+        group_by(feature) %>%
+        ggdist::median_qi(!!rlang::sym(p), .width=c(0.5, 0.75, 0.90, 0.95, 0.97)) %>% 
+        mutate(feature=reorder(factor(feature), !!rlang::sym(p))) %>% 
+        filter(feature %in% c(ranks_ls[[p]]$sig_increasing, ranks_ls[[p]]$sig_decreasing)) %>%
+        
+        ggplot(aes(y=reorder(factor(feature), !!rlang::sym(p)), x=!!rlang::sym(p), xmin=.lower, xmax=.upper)) +
+        ggdist::geom_interval(aes(alpha=.width), color="orange3") +
+        scale_alpha_continuous("Credible interval", range=c(.7, .15), breaks=c(0.5, 0.75, 0.90, 0.95, 0.97)) +
+        geom_point() +
+        theme(
+          legend.key=element_rect(fill='white'),
+          legend.text=element_text(size=10, color="black"),
+          strip.background=element_blank(),
+          strip.text=element_blank(),
+          panel.grid.major=element_blank(), 
+          panel.grid.minor=element_blank(), 
+          panel.background=element_rect(fill="white"),
+          panel.border=element_rect(colour="black", fill=NA, size=1),
+          axis.ticks.length.y=unit(0.25,"cm"), 
+          axis.text.x=element_text(size=12, color="black"),
+          axis.text.y=ggtext::element_markdown(color=unname(y_labels_t3), size=7)) +
+        labs(x="Log-Ratio Value", y=NULL, title=paste0("T2: R vs NR")) + 
+        geom_vline(xintercept=0, linetype="dashed", color="darkgray")
+      
+      plot_ls[[p]] <- gp
+      
+    } else if (p=="avgdiff_RvsNR_x_t3") { 
+      
+      gp <- avg_diffs %>% 
+        select(feature, !!rlang::sym(p)) %>% 
+        group_by(feature) %>%
+        ggdist::median_qi(!!rlang::sym(p), .width=c(0.5, 0.75, 0.90, 0.95, 0.97)) %>% 
+        mutate(feature=reorder(factor(feature), !!rlang::sym(p))) %>% 
+        filter(feature %in% c(ranks_ls[[p]]$sig_increasing, ranks_ls[[p]]$sig_decreasing)) %>%
+        
+        ggplot(aes(y=reorder(factor(feature), !!rlang::sym(p)), x=!!rlang::sym(p), xmin=.lower, xmax=.upper)) +
+        ggdist::geom_interval(aes(alpha=.width), color="orange3") +
+        scale_alpha_continuous("Credible interval", range=c(.7, .15), breaks=c(0.5, 0.75, 0.90, 0.95, 0.97)) +
+        geom_point() +
+        theme(
+          legend.key=element_rect(fill='white'),
+          legend.text=element_text(size=10, color="black"),
+          strip.background=element_blank(),
+          strip.text=element_blank(),
+          panel.grid.major=element_blank(), 
+          panel.grid.minor=element_blank(), 
+          panel.background=element_rect(fill="white"),
+          panel.border=element_rect(colour="black", fill=NA, size=1),
+          axis.ticks.length.y=unit(0.25,"cm"), 
+          axis.text.x=element_text(size=12, color="black"),
+          axis.text.y=ggtext::element_markdown(color=unname(y_labels_t4), size=7)) +
+        labs(x="Log-Ratio Value", y=NULL, title=paste0("T3: R vs NR")) + 
+        geom_vline(xintercept=0, linetype="dashed", color="darkgray")
+      
+      plot_ls[[p]] <- gp
+      
+    } else if (p=="slopes_R") { 
+      
+      gp <- avg_diffs %>% 
+        select(feature, !!rlang::sym(p)) %>% 
+        group_by(feature) %>%
+        ggdist::median_qi(!!rlang::sym(p), .width=c(0.5, 0.75, 0.90, 0.95, 0.97)) %>% 
+        mutate(feature=reorder(factor(feature), !!rlang::sym(p))) %>% 
+        filter(feature %in% c(ranks_ls2[[p]]$sig_increasing, ranks_ls2[[p]]$sig_decreasing)) %>%
+        
+        ggplot(aes(y=reorder(factor(feature), !!rlang::sym(p)), x=!!rlang::sym(p), xmin=.lower, xmax=.upper)) +
+        ggdist::geom_interval(aes(alpha=.width), color="orange3") +
+        scale_alpha_continuous("Credible interval", range=c(.7, .15), breaks=c(0.5, 0.75, 0.90, 0.95, 0.97)) +
+        geom_point() +
+        theme(
+          legend.key=element_rect(fill='white'),
+          legend.text=element_text(size=10, color="black"),
+          strip.background=element_blank(),
+          strip.text=element_blank(),
+          panel.grid.major=element_blank(), 
+          panel.grid.minor=element_blank(), 
+          panel.background=element_rect(fill="white"),
+          panel.border=element_rect(colour="black", fill=NA, size=1),
+          axis.ticks.length.y=unit(0.25,"cm"), 
+          axis.text.x=element_text(size=12, color="black"),
+          axis.text.y=ggtext::element_markdown(color=unname(y_labels_t4), size=7)) +
+        labs(x="Log-Ratio Value", y=NULL, title=paste0("Slope R")) + 
+        geom_vline(xintercept=0, linetype="dashed", color="darkgray")
+      
+      plot_ls[[p]] <- gp
+      
+    } else if (p=="slopes_NR") { 
+      
+      gp <- avg_diffs %>% 
+        select(feature, !!rlang::sym(p)) %>% 
+        group_by(feature) %>%
+        ggdist::median_qi(!!rlang::sym(p), .width=c(0.5, 0.75, 0.90, 0.95, 0.97)) %>% 
+        mutate(feature=reorder(factor(feature), !!rlang::sym(p))) %>% 
+        filter(feature %in% c(ranks_ls2[[p]]$sig_increasing, ranks_ls2[[p]]$sig_decreasing)) %>%
+        
+        ggplot(aes(y=reorder(factor(feature), !!rlang::sym(p)), x=!!rlang::sym(p), xmin=.lower, xmax=.upper)) +
+        ggdist::geom_interval(aes(alpha=.width), color="orange3") +
+        scale_alpha_continuous("Credible interval", range=c(.7, .15), breaks=c(0.5, 0.75, 0.90, 0.95, 0.97)) +
+        geom_point() +
+        theme(
+          legend.key=element_rect(fill='white'),
+          legend.text=element_text(size=10, color="black"),
+          strip.background=element_blank(),
+          strip.text=element_blank(),
+          panel.grid.major=element_blank(), 
+          panel.grid.minor=element_blank(), 
+          panel.background=element_rect(fill="white"),
+          panel.border=element_rect(colour="black", fill=NA, size=1),
+          axis.ticks.length.y=unit(0.25,"cm"), 
+          axis.text.x=element_text(size=12, color="black"),
+          axis.text.y=ggtext::element_markdown(color=unname(y_labels_t4), size=7)) +
+        labs(x="Log-Ratio Value", y=NULL, title=paste0("Slope NR")) + 
+        geom_vline(xintercept=0, linetype="dashed", color="darkgray")
+      
+      plot_ls[[p]] <- gp
+    }
+  }
+  return(plot_ls)
+}
+```
+
+```{r}
+# Then we run this function for the "siglevel" that we want.
+# To generate Extended Data Fig. 2 we also run it on siglevel="0"
+avg_RvsNR_p90 <- plot_RvsNR(pibble_fit=fit_species_clr, siglevel="p90")
+avg_RvsNR_pALL <- plot_RvsNR(pibble_fit=fit_species_clr, siglevel="p0")
+
+```
+
+```{r}
+# First inspection
+avg_RvsNR_p90$avgdiff_RvsNR_x_t0 + avg_RvsNR_p90$avgdiff_RvsNR_x_t1 + 
+  avg_RvsNR_p90$avgdiff_RvsNR_x_t2 + avg_RvsNR_p90$avgdiff_RvsNR_x_t3
+```
+
+```{r}
+# Plot Extended Data Fig. 2 
+
+threshold <- 0.90
+
+all_taxa <- unique(c(
+  (avg_RvsNR_p90$avgdiff_RvsNR_x_t0$data %>% filter(.width==threshold) %>% arrange(desc(avgdiff_RvsNR_x_t0)) %>% select(feature) %>% mutate(feature=as.character(feature)) %>% pull()),
+  (avg_RvsNR_p90$avgdiff_RvsNR_x_t1$data %>% filter(.width==threshold) %>% arrange(desc(avgdiff_RvsNR_x_t1)) %>% select(feature) %>% mutate(feature=as.character(feature)) %>% pull()),
+  (avg_RvsNR_p90$avgdiff_RvsNR_x_t2$data %>% filter(.width==threshold) %>% arrange(desc(avgdiff_RvsNR_x_t2)) %>% select(feature) %>% mutate(feature=as.character(feature)) %>% pull()),
+  (avg_RvsNR_p90$avgdiff_RvsNR_x_t3$data %>% filter(.width==threshold) %>% arrange(desc(avgdiff_RvsNR_x_t3)) %>% select(feature) %>% mutate(feature=as.character(feature)) %>% pull()))) %>% 
+  unique() %>% 
+  data.frame()
+colnames(all_taxa) <- "all_taxa"
+
+tmp_t0 <-
+  all_taxa %>% 
+  full_join(avg_RvsNR_p90$avgdiff_RvsNR_x_t0$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(avgdiff_RvsNR_x_t0)) %>% 
+              mutate(all_taxa=feature) %>% 
+              select(all_taxa, feature, median_p90=avgdiff_RvsNR_x_t0, lwr=.lower, upr=.upper), 
+            by="all_taxa") %>% 
+  mutate(feature=ifelse(is.na(feature), NA, 1),
+         visit="T0")
+
+tmp_t1 <-
+  tmp_t0 %>% 
+  select(all_taxa) %>% 
+  full_join(avg_RvsNR_p90$avgdiff_RvsNR_x_t1$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(avgdiff_RvsNR_x_t1)) %>% 
+              select(feature, median_p90=avgdiff_RvsNR_x_t1, lwr=.lower, upr=.upper), by=c("all_taxa"="feature")) %>% 
+  mutate(feature=ifelse(is.na(median_p90), NA, 1),
+         visit="T1")
+
+tmp_t2 <-
+  tmp_t1 %>% 
+  select(all_taxa) %>% 
+  full_join(avg_RvsNR_p90$avgdiff_RvsNR_x_t2$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(avgdiff_RvsNR_x_t2)) %>% 
+              select(feature, median_p90=avgdiff_RvsNR_x_t2, lwr=.lower, upr=.upper), by=c("all_taxa"="feature")) %>% 
+  mutate(feature=ifelse(is.na(median_p90), NA, 1),
+         visit="T2") 
+
+tmp_t3 <-
+  tmp_t2 %>% 
+  select(all_taxa) %>% 
+  full_join(avg_RvsNR_p90$avgdiff_RvsNR_x_t3$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(avgdiff_RvsNR_x_t3)) %>% 
+              select(feature, median_p90=avgdiff_RvsNR_x_t3, lwr=.lower, upr=.upper), by=c("all_taxa"="feature")) %>% 
+  mutate(feature=ifelse(is.na(median_p90), NA, 1),
+         visit="T3")
+
+p1_dat <- 
+  bind_rows(tmp_t0, tmp_t1, tmp_t2, tmp_t3) %>% 
+  mutate(alpha=ifelse(is.na(median_p90), 0, 1),
+         sign=sign(median_p90),
+         sign=factor(sign, levels=c(1,-1)),
+         sign=ifelse(is.na(sign), 0, sign),
+         visit=factor(recode(visit, `T0`=0, `T1`=1, `T2`=2, `T3`=3)),
+         all_taxa=fct_reorder(fct_reorder(all_taxa,alpha,median), as.numeric(visit), min),
+         all_taxa=fct_reorder2(all_taxa, median_p90, sign, .na_rm = F),
+         all_taxa=fct_reorder2(factor(all_taxa), alpha, visit),
+         all_taxa=fct_reorder2(all_taxa, median_p90, sign, .na_rm = F)
+)
+
+tmp_t0_all <-
+  all_taxa %>% 
+  left_join(avg_RvsNR_pALL$avgdiff_RvsNR_x_t0$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(avgdiff_RvsNR_x_t0)) %>% 
+              mutate(all_taxa=feature) %>% 
+              select(all_taxa, feature, median=avgdiff_RvsNR_x_t0, lwr=.lower, upr=.upper), 
+            by="all_taxa") %>% 
+  mutate(feature=ifelse(is.na(feature), NA, 1),
+         visit="T0")
+
+tmp_t1_all <-
+  tmp_t0 %>% 
+  select(all_taxa) %>% 
+  full_join(avg_RvsNR_pALL$avgdiff_RvsNR_x_t1$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(avgdiff_RvsNR_x_t1)) %>% 
+              select(feature, median=avgdiff_RvsNR_x_t1, lwr=.lower, upr=.upper), by=c("all_taxa"="feature")) %>% 
+  mutate(feature=ifelse(is.na(median), NA, 1),
+         visit="T1")
+
+tmp_t2_all <-
+  tmp_t1 %>% 
+  select(all_taxa) %>% 
+  full_join(avg_RvsNR_pALL$avgdiff_RvsNR_x_t2$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(avgdiff_RvsNR_x_t2)) %>% 
+              select(feature, median=avgdiff_RvsNR_x_t2, lwr=.lower, upr=.upper), by=c("all_taxa"="feature")) %>% 
+  mutate(feature=ifelse(is.na(median), NA, 1),
+         visit="T2")
+
+tmp_t3_all <-
+  tmp_t2 %>% 
+  select(all_taxa) %>% 
+  full_join(avg_RvsNR_pALL$avgdiff_RvsNR_x_t3$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(avgdiff_RvsNR_x_t3)) %>% 
+              select(feature, median=avgdiff_RvsNR_x_t3, lwr=.lower, upr=.upper), by=c("all_taxa"="feature")) %>% 
+  mutate(feature=ifelse(is.na(median), NA, 1),
+         visit="T3")
+
+p1_dat_all <- 
+  bind_rows(tmp_t0_all, tmp_t1_all, tmp_t2_all, tmp_t3_all) %>% 
+  mutate(
+    alpha=ifelse(is.na(median), 0, 1),
+    sign=sign(median),
+    sign=factor(sign, levels=c(1,-1)),
+    visit=factor(recode(visit, `T0`=0, `T1`=1, `T2`=2, `T3`=3)),
+    all_taxa=fct_reorder2(fct_reorder2(factor(all_taxa), alpha, visit), median, sign))
+
+# Response slope
+tmp_R_t1 <-
+  all_taxa %>% 
+  select(all_taxa) %>% 
+  full_join(avg_RvsNR_p90$slopes_R$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(slopes_R)) %>% 
+              select(feature, median_p90=slopes_R), by=c("all_taxa"="feature")) %>% 
+  mutate(feature=ifelse(is.na(median_p90), NA, 1),
+         visit="T1") 
+
+# Non-responder slope
+tmp_NR_t1 <-
+  all_taxa %>% 
+  select(all_taxa) %>% 
+  full_join(avg_RvsNR_p90$slopes_NR$data %>% 
+              filter(.width==threshold) %>% 
+              arrange(desc(slopes_NR)) %>% 
+              select(feature, median_p90=slopes_NR), by=c("all_taxa"="feature")) %>% 
+  mutate(feature=ifelse(is.na(median_p90), NA, 1),
+         visit="T1")
+
+# Set limits 
+rng <- c((avg_RvsNR_p90$slopes_R$data %>% filter(.width==threshold) %>% arrange(desc(slopes_R)) %>% pull(slopes_R) %>% range()),
+         (avg_RvsNR_p90$slopes_NR$data %>% filter(.width==threshold) %>% arrange(desc(slopes_NR)) %>% pull(slopes_NR) %>% range()))
+
+# Plot responder slope
+p1 <- 
+  tmp_R_t1 %>% 
+  mutate(all_taxa=factor(all_taxa, levels=levels(p1_dat$all_taxa)),
+         visit=factor(recode(visit, `T0`=0, `T1`=1, `T2`=2, `T3`=3))) %>% 
+  ggplot(aes(y=all_taxa, x=visit, fill=median_p90)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#026ac9", mid="white", high = "#ef0303", limits=c(min(rng), max(rng))) +
+  scale_x_discrete(expand=c(0, 0, 0, 0)) + 
+  coord_fixed(ratio = 0.7) +
+  theme(
+    legend.position = "none",
+    legend.key=element_rect(fill='white'),
+    legend.text=element_text(size=10, color="black"),
+    strip.background=element_blank(),
+    strip.text=element_text(size=15, color="black"),
+    panel.grid.major=element_blank(), 
+    panel.grid.minor=element_blank(), 
+    panel.background=element_rect(fill="white"),
+    panel.border=element_rect(colour="black", fill=NA, size=1),
+    plot.title=element_text(size=15, color="black"),
+    axis.title=element_text(size=15, color="black"),
+    axis.ticks.length=unit(0.10,"cm"), 
+    axis.ticks.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_text(size=7, color="black")) +
+  labs(y=NULL, x=NULL)
+
+# Plot non-responder slope
+p2 <- 
+  tmp_NR_t1 %>% 
+  mutate(all_taxa=factor(all_taxa, levels=levels(p1_dat$all_taxa)),
+         visit=factor(recode(visit, `T0`=0, `T1`=1, `T2`=2, `T3`=3))) %>% 
+  ggplot(aes(y=all_taxa, x=visit, fill=median_p90)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#026ac9", mid="white", high = "#ef0303", limits=c(min(rng), max(rng))) +
+  scale_x_discrete(expand=c(0, 0, 0, 0)) + 
+  coord_fixed(ratio = 0.7) +
+  theme(
+    legend.key=element_rect(fill='white'),
+    legend.text=element_text(size=10, color="black"),
+    strip.background=element_blank(),
+    strip.text=element_text(size=15, color="black"),
+    panel.grid.major=element_blank(), 
+    panel.grid.minor=element_blank(), 
+    panel.background=element_rect(fill="white"),
+    panel.border=element_rect(colour="black", fill=NA, size=1),
+    plot.title=element_text(size=15, color="black"),
+    axis.title=element_text(size=15, color="black"),
+    axis.ticks.y=element_blank(),
+    axis.ticks.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_blank())+
+  labs(y=NULL, x=NULL)
+
+# Plot heatmap
+p3 <- 
+  p1_dat %>% 
+  ggplot(aes(y=all_taxa, x=visit, fill=median_p90)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#8c510a", mid="white", high = "#01665e") +
+  scale_x_discrete(expand=c(0.2, 0, 0.2, 0)) + 
+  coord_fixed(ratio = 0.7) +
+  theme(
+    legend.key=element_rect(fill='white'),
+    legend.text=element_text(size=10, color="black"),
+    strip.background=element_blank(),
+    strip.text=element_text(size=15, color="black"),
+    panel.grid.major=element_blank(), 
+    panel.grid.minor=element_blank(), 
+    panel.background=element_rect(fill="white"),
+    panel.border=element_rect(colour="black", fill=NA, size=1),
+    plot.title=element_text(size=15, color="black"),
+    axis.title=element_text(size=12, color="black"),
+    axis.ticks.length=unit(0.10,"cm"), 
+    axis.ticks.y=element_blank(),
+    axis.text.x=element_text(size=10,color="black"),
+    axis.text.y=element_blank()) +
+  labs(y=NULL, x="Visit")
+
+p_out <- p1 + p2 + p3 + plot_layout(guides = "collect")
+
+print(p_out)
+
+```
