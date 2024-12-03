@@ -651,15 +651,6 @@ tmp_t3_all <-
   mutate(feature=ifelse(is.na(median), NA, 1),
          visit="T3")
 
-p1_dat_all <- 
-  bind_rows(tmp_t0_all, tmp_t1_all, tmp_t2_all, tmp_t3_all) %>% 
-  mutate(
-    alpha=ifelse(is.na(median), 0, 1),
-    sign=sign(median),
-    sign=factor(sign, levels=c(1,-1)),
-    visit=factor(recode(visit, `T0`=0, `T1`=1, `T2`=2, `T3`=3)),
-    all_taxa=fct_reorder2(fct_reorder2(factor(all_taxa), alpha, visit), median, sign))
-
 # Response slope
 tmp_R_t1 <-
   all_taxa %>% 
