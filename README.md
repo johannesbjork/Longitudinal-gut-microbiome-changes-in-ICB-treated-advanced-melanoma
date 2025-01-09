@@ -21,7 +21,7 @@
 
 
 * colitisyes_vs_colitisno.R
-    - Function for computing and plotting the marginal average for colitis yes vs no, averaging over Z (PFS12), (therapy regimen) and W3 (PPI-use)
+    - Function for computing and plotting the marginal average for colitis yes vs no, averaging over Z (PFS12), W1 (therapy regimen) and W3 (PPI-use)
 
 * survival_analysis.R 
     - Code for the survival analysis, including the calculation of the longitudinal balance
