@@ -955,7 +955,10 @@ for(feature_j in all_taxa$all_taxa[18]) {
   guides(alpha="none", linetype="none")
   
  p_out2 <- p4 + p5
- ggsave(paste0("feature_j,".pdf"), plot=p_out2, device="pdf", width=12, height=5)
+ 
+ print(p_out2)
+
+ #ggsave(paste0("feature_j,".pdf"), plot=p_out2, device="pdf", width=12, height=5)
 }
 
 ```
