@@ -533,13 +533,11 @@ plot_RvsNR <- function(pibble_fit=pibble_fit, siglevel=siglevel) {
 # To generate Extended Data Fig. 2 we also run it on siglevel="0"
 avg_RvsNR_p90 <- plot_RvsNR(pibble_fit=fit_species_clr, siglevel="p90")
 avg_RvsNR_pALL <- plot_RvsNR(pibble_fit=fit_species_clr, siglevel="p0")
-
 ```
 
 ```{r}
 # First inspection
-avg_RvsNR_p90$avgdiff_RvsNR_x_t0 + avg_RvsNR_p90$avgdiff_RvsNR_x_t1 + 
-  avg_RvsNR_p90$avgdiff_RvsNR_x_t2 + avg_RvsNR_p90$avgdiff_RvsNR_x_t3
+avg_RvsNR_p90$avgdiff_RvsNR_x_t0 + avg_RvsNR_p90$avgdiff_RvsNR_x_t1 + avg_RvsNR_p90$avgdiff_RvsNR_x_t2 + avg_RvsNR_p90$avgdiff_RvsNR_x_t3
 ```
 
 ```{r}
@@ -760,5 +758,204 @@ p3 <-
 p_out <- p1 + p2 + p3 + plot_layout(guides = "collect")
 
 print(p_out)
+
+```
+
+```{r}
+# Plot trajectory plots (e.g. Fig. 1b) for the overall comparison between R and NR (same as above)
+# Below we are computing the slopes for responders (R) and non-responders (NR), including the average difference, just like in the function `plot_RvsNR` 
+# Here we are plotting the SGBs in the `all_taxa` data.frame we define above, but below we are not looping over all 99 but instead the 18th SGB which corresponds to "Ruminococcaceae | Agathobaculum_butyriciproducens | SGB14993_group" which is highlighted in Fig. 1b 
+# We also need the fitted model (e.g. `fit_species_clr`) the `p1_dat` data.frame from above
+
+threshold <- 0.90 
+focus_vars <- c("visit","PFS12yes","combiIOyes","colitisyes","ppiyes")
+
+intercepts_and_slopes_dat <- as.data.frame.table(fit_species_clr$Lambda) %>%
+    pivot_wider(c(Var1,Var3), names_from=Var2, values_from=Freq) %>%
+    select(feature=Var1, b0=`(Intercept)`, contains(focus_vars)) %>% 
+    mutate(feature=str_remove_all(string = feature, pattern = "f__"),
+           feature=str_remove_all(string = feature, pattern = "s__"),
+           feature=str_remove_all(string = feature, pattern = "t__"))
+
+
+for(feature_j in all_taxa$all_taxa[18]) {
+  
+  print(feature_j)
+  
+  p4 <- 
+  p1_dat %>% 
+  filter(all_taxa==feature_j) %>% 
+      mutate(sig=factor(ifelse(upr > 0 & lwr < 0, "Not significant", "Significant"),levels=c("Significant","Not significant"))) %>% 
+  ggplot(aes(x=visit, y=median_p90, color=factor(sig))) + 
+  geom_point(stat="identity") + 
+  geom_hline(yintercept=0, color="red") +
+  geom_pointrange(aes(ymin=lwr, ymax=upr)) +
+  scale_x_discrete(expand=c(0.1,0.1,0.1,0.1)) +
+  scale_color_manual(values = c("black","gray")) + 
+  theme(
+    legend.title = element_blank(),
+    legend.key=element_rect(fill='white'),
+    legend.text=element_text(size=10, color="black"),
+    strip.background=element_blank(),
+    strip.text=element_text(size=15, color="black"),
+    panel.grid.major=element_blank(), 
+    panel.grid.minor=element_blank(), 
+    panel.background=element_rect(fill="white"),
+    panel.border=element_rect(colour="black", fill=NA, size=1),
+    plot.title=element_text(size=15, color="black"),
+    axis.title=element_text(size=15, color="black"),
+    axis.ticks.length=unit(0.10,"cm"), 
+    axis.text.x=element_text(size=12,color="black"),
+    axis.text.y=element_text(size=12,color="black")) +
+  labs(y=" Average difference between R and NR \n (log-fold change)", x="Visit", title=feature_j)
+  
+   intercepts_and_slopes <-
+      intercepts_and_slopes_dat %>% 
+      filter(feature==feature_j) %>% 
+
+    mutate(
+
+      ## INTERCEPTS
+      intercept_NR = b0 + 0.5*(!!rlang::sym(focus_vars[3]) +
+                               !!rlang::sym(focus_vars[4]) +
+                               !!rlang::sym(focus_vars[5])),
+      
+      intercept_R = 
+        b0 + 
+        !!rlang::sym(focus_vars[2]) +
+        0.5*(!!rlang::sym(focus_vars[3]) +
+             !!rlang::sym(paste0(focus_vars[2],":",focus_vars[3])) +
+             !!rlang::sym(focus_vars[4]) +
+             !!rlang::sym(paste0(focus_vars[2],":",focus_vars[4])) +
+             !!rlang::sym(focus_vars[5]) +
+             !!rlang::sym(paste0(focus_vars[2],":",focus_vars[5]))),
+      
+      ## SLOPES
+      slopes_NR_t0 =
+        intercept_NR +
+        0*!!rlang::sym(focus_vars[1]) +
+        0.5*(
+             0*(
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5])))),
+      
+       slopes_NR_t1 =
+        intercept_NR +
+        1*!!rlang::sym(focus_vars[1]) +
+        0.5*(
+             1*(
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5])))),
+      
+       slopes_NR_t2 =
+        intercept_NR +
+        2*!!rlang::sym(focus_vars[1]) +
+        0.5*(
+             2*(
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5])))),
+      
+       slopes_NR_t3 =
+        intercept_NR +
+        3*!!rlang::sym(focus_vars[1]) +
+        0.5*(
+             3*(
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+                !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5])))),
+      
+      slopes_R_t0 =
+        intercept_R +
+        0*(!!rlang::sym(focus_vars[1]) +
+        !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2]))) +
+        (0.5*(
+              0*(
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[3])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[4])) +       
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[5]))))),
+      
+      slopes_R_t1 =
+        intercept_R +
+        1*(!!rlang::sym(focus_vars[1]) +
+        !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2]))) +
+        (0.5*(
+              1*(
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[3])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[4])) +       
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[5]))))),
+      
+      slopes_R_t2 =
+        intercept_R +
+        2*(!!rlang::sym(focus_vars[1]) +
+        !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2]))) +
+        (0.5*(
+              2*(
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[3])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[4])) +       
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[5]))))),
+      
+      slopes_R_t3 =
+        intercept_R +
+        3*(!!rlang::sym(focus_vars[1]) +
+        !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2]))) +
+        (0.5*(
+              3*(
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[3])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[4])) + 
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[5])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[3])) +
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[4])) +       
+                 !!rlang::sym(paste0(focus_vars[1],":",focus_vars[2],":",focus_vars[5])))))
+  
+      ) %>% 
+     select(slopes_NR_t0, slopes_NR_t1, slopes_NR_t2, slopes_NR_t3, slopes_R_t0, slopes_R_t1, slopes_R_t2, slopes_R_t3)
+
+  p5 <-
+    intercepts_and_slopes %>% 
+    summarise(across(everything(), ggdist::median_qi, .width=threshold)) %>% 
+    c() %>% 
+    bind_rows(.id = "id") %>% 
+    mutate(PFS12=str_split_fixed(id,"\\_", 3)[,2],
+           Visit=str_split_fixed(id,"\\_", 3)[,3],
+           Visit=as.numeric(str_remove(Visit, "t"))) %>% 
+    ggplot(aes(x=Visit, y=y, color=PFS12, fill=PFS12)) +
+    geom_point(size=2) +
+    geom_line(size=1) +
+    scale_x_continuous(expand=c(0.01,0,0.01,0)) +
+    theme(
+      legend.title=element_blank(),
+      legend.key=element_rect(fill='white'),
+      legend.text=element_text(size=15, color="black"),
+      strip.background=element_blank(),
+      strip.text=element_text(size=15, color="black"),
+      panel.grid.major=element_blank(), 
+      panel.grid.minor=element_blank(), 
+      panel.background=element_rect(fill="white"),
+      panel.border=element_rect(colour="black", fill=NA, size=1),
+      plot.title=element_text(size=12, color="black"),
+      axis.title=element_text(size=12, color="black"),
+      axis.ticks.length=unit(0.10,"cm"), 
+      axis.text.x=element_text(size=10, color="black"),
+      axis.text.y=element_text(size=10, color="black")) +
+    labs(y="Log-Ratio Value", x="Visit") +
+    scale_color_manual(values=c("#8c510a","#01665e")) +
+    scale_fill_manual(values=c("#8c510a","#01665e")) +
+  guides(alpha="none", linetype="none")
+  
+ p_out2 <- p4 + p5
+ ggsave(paste0("feature_j,".pdf"), plot=p_out2, device="pdf", width=12, height=5)
+}
 
 ```
